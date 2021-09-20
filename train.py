@@ -136,7 +136,7 @@ def gan_trainer(
             hr = hr.to(device)
             preds, _ = generator([sample_z])
 
-            print(f'hr : {hr.shape}, preds : {preds.shape}')
+            print(f"hr : {hr.shape}, preds : {preds.shape}")
             """ 1 epoch 마다 테스트 이미지 확인 """
             if i == 0:
                 vutils.save_image(
@@ -293,7 +293,7 @@ def main_worker(gpu, args):
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
     )
 
     if gpu == 0 or not args.distributed:
@@ -332,7 +332,7 @@ def main_worker(gpu, args):
         )
 
 
-# 616210 CUDA_VISIBLE_DEVICES=2 nohup python3 train.py --train-dir /dataset/FFHQ --eval-dir /dataset/FFHQ_test/ --outputs-dir weights_stylegan2 --batch-size 12 --patch-size 256 --num-epoch 20 --is-concat &
+# 643299 CUDA_VISIBLE_DEVICES=3 nohup python3 train.py --train-dir /dataset/FFHQ/ --eval-dir /dataset/FFHQ_test/ --outputs-dir weights_stylegan2 --batch-size 16 --patch-size 256 --num-epoch 20 &
 if __name__ == "__main__":
     """로그 설정"""
     logger = logging.getLogger(__name__)
