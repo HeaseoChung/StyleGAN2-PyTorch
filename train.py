@@ -156,7 +156,7 @@ def gan_trainer(
                 generator.module.state_dict(),
                 os.path.join(args.outputs_dir, "best_g.pth"),
             )
-        if epoch % 1 == 0:
+        if epoch % args.save_every == 0:
             torch.save(
                 {
                     "epoch": epoch,
@@ -176,7 +176,7 @@ def gan_trainer(
                 os.path.join(args.outputs_dir, "best_g.pth"),
             )
 
-        if epoch % 1 == 0:
+        if epoch % args.save_every == 0:
             torch.save(
                 {
                     "epoch": epoch,
@@ -187,8 +187,8 @@ def gan_trainer(
                 os.path.join(args.outputs_dir, "g_epoch_{}.pth".format(epoch)),
             )
 
-    """Epoch 1번에 1번 저장"""
-    if epoch % 1 == 0:
+    """Epoch args.save_every번에 args.save_every번 저장"""
+    if epoch % args.save_every == 0:
         """Discriminator 모델 저장"""
         torch.save(
             {
@@ -379,6 +379,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-epochs", type=int, default=1000)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--save-every", type=int, default=8)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--resume-g", type=str, default="generator.pth")
     parser.add_argument("--resume-d", type=str, default="discriminator.pth")
