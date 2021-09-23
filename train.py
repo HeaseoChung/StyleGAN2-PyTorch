@@ -13,10 +13,15 @@ from torch.utils.data.dataloader import DataLoader
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import AverageMeter, calc_psnr, calc_ssim, mixing_noise, requires_grad
+from utils import AverageMeter, mixing_noise
 from dataset import Dataset
 from PIL import Image
-from models.loss import d_logistic_loss, g_nonsaturating_loss
+from models.loss import (
+    d_logistic_loss,
+    g_nonsaturating_loss,
+    d_r1_loss,
+    g_path_regularize,
+)
 from models.model import Discriminator, Generator
 
 """ DDP (Distributed data parallel) """
@@ -103,6 +108,19 @@ def gan_trainer(
         d_loss.backward()
         discriminator_optimizer.step()
 
+        d_regularize = i % args.d_reg_every == 0
+
+        if d_regularize:
+            real_img.requires_grad = True
+
+            real_pred = discriminator(real_img)
+            r1_loss = d_r1_loss(real_pred, real_img)
+
+            discriminator.zero_grad()
+            (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
+
+            discriminator_optimizer.step()
+
         """============= 생성자 학습 ============="""
         # requires_grad(generator, True)
         # requires_grad(discriminator, False)
@@ -122,6 +140,33 @@ def gan_trainer(
         g_loss.backward()
         generator_optimizer.step()
 
+        if i == 0:
+            vutils.save_image(
+                fake_output.detach(),
+                os.path.join(args.outputs_dir, f"preds_{epoch}.jpg"),
+            )
+
+        g_regularize = i % args.g_reg_every == 0
+
+        if g_regularize:
+            path_batch_size = max(1, args.batch_size // args.path_batch_shrink)
+            noise = mixing_noise(path_batch_size, args.style_dims, args.mixing, device)
+            fake_img, latents = generator(noise, return_latents=True)
+
+            path_loss, mean_path_length, path_lengths = g_path_regularize(
+                fake_img, latents, mean_path_length
+            )
+
+            generator.zero_grad()
+            weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
+
+            if args.path_batch_shrink:
+                weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
+
+            weighted_path_loss.backward()
+
+            generator_optimizer.step()
+
         """ 생성자 초기화 """
         generator.zero_grad()
 
@@ -129,33 +174,8 @@ def gan_trainer(
         d_losses.update(d_loss.item(), hr.size(0))
         g_losses.update(g_loss.item(), hr.size(0))
 
-    """  테스트 Epoch 시작 """
-    generator.eval()
-    with torch.no_grad():
-        for i, hr in enumerate(eval_dataloader):
-            hr = hr.to(device)
-            preds, _ = generator([sample_z])
-
-            print(f"hr : {hr.shape}, preds : {preds.shape}")
-            """ 1 epoch 마다 테스트 이미지 확인 """
-            if i == 0:
-                vutils.save_image(
-                    hr.detach(), os.path.join(args.outputs_dir, f"HR_{epoch}.jpg")
-                )
-                vutils.save_image(
-                    preds.detach(), os.path.join(args.outputs_dir, f"preds_{epoch}.jpg")
-                )
-            psnr.update(calc_psnr(preds, hr), len(hr))
-            ssim.update(calc_ssim(preds, hr).mean(), len(hr))
-
     if args.distributed and device == 0:
         """Generator 모델 저장"""
-        if ssim.avg > best_ssim:
-            best_ssim = ssim.avg
-            torch.save(
-                generator.module.state_dict(),
-                os.path.join(args.outputs_dir, "best_g.pth"),
-            )
         if epoch % args.save_every == 0:
             torch.save(
                 {
@@ -169,13 +189,6 @@ def gan_trainer(
 
     if not args.distributed:
         """Generator 모델 저장"""
-        if ssim.avg > best_ssim:
-            best_ssim = ssim.avg
-            torch.save(
-                generator.state_dict(),
-                os.path.join(args.outputs_dir, "best_g.pth"),
-            )
-
         if epoch % args.save_every == 0:
             torch.save(
                 {
@@ -206,10 +219,6 @@ def gan_trainer(
 
         writer.add_scalar("real_score/train", real_score.avg, epoch)
         writer.add_scalar("fake_score/train", fake_score.avg, epoch)
-
-        """ 1 epoch 마다 텐서보드 업데이트 """
-        writer.add_scalar("psnr/test", psnr.avg, epoch)
-        writer.add_scalar("ssim/test", ssim.avg, epoch)
 
         print("Training complete in: " + str(datetime.now() - start))
 
@@ -332,7 +341,7 @@ def main_worker(gpu, args):
         )
 
 
-# 643299 CUDA_VISIBLE_DEVICES=3 nohup python3 train.py --train-dir /dataset/FFHQ/ --eval-dir /dataset/FFHQ_test/ --outputs-dir weights_stylegan2 --batch-size 16 --patch-size 256 --num-epoch 20 &
+# 25562 CUDA_VISIBLE_DEVICES=2 nohup python3 train.py --train-dir /datasets/FFHQ --eval-dir /datasets/FFHQ_test/ --outputs-dir weights_stylegan2 --batch-size 16 --patch-size 256 --num-epoch 200 &
 if __name__ == "__main__":
     """로그 설정"""
     logger = logging.getLogger(__name__)
@@ -352,6 +361,21 @@ if __name__ == "__main__":
         type=int,
         default=64,
         help="number of the samples generated during training",
+    )
+    parser.add_argument(
+        "--r1", type=float, default=10, help="weight of the r1 regularization"
+    )
+    parser.add_argument(
+        "--path_regularize",
+        type=float,
+        default=2,
+        help="weight of the path length regularization",
+    )
+    parser.add_argument(
+        "--path_batch_shrink",
+        type=int,
+        default=2,
+        help="batch size reducing factor for the path length regularization (reduce memory consumption)",
     )
     parser.add_argument(
         "--d-reg-every",
@@ -379,7 +403,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-epochs", type=int, default=1000)
     parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--save-every", type=int, default=8)
+    parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--resume-g", type=str, default="generator.pth")
     parser.add_argument("--resume-d", type=str, default="discriminator.pth")
