@@ -57,7 +57,6 @@ def gan_trainer(
     generator_optimizer,
     discriminator_optimizer,
     epoch,
-    best_ssim,
     device,
     writer,
     args,
@@ -158,7 +157,6 @@ def gan_trainer(
                     "epoch": epoch,
                     "model_state_dict": generator.module.state_dict(),
                     "optimizer_state_dict": generator_optimizer.state_dict(),
-                    "best_ssim": best_ssim,
                 },
                 os.path.join(args.outputs_dir, "g_epoch_{}.pth".format(epoch)),
             )
@@ -171,7 +169,6 @@ def gan_trainer(
                     "epoch": epoch,
                     "model_state_dict": generator.state_dict(),
                     "optimizer_state_dict": generator_optimizer.state_dict(),
-                    "best_ssim": best_ssim,
                 },
                 os.path.join(args.outputs_dir, "g_epoch_{}.pth".format(epoch)),
             )
@@ -315,7 +312,7 @@ def main_worker(gpu, args):
         )
 
 
-# 25562 CUDA_VISIBLE_DEVICES=2 nohup python3 train.py --train-dir /datasets/FFHQ --eval-dir /datasets/FFHQ_test/ --outputs-dir weights_stylegan2 --batch-size 16 --patch-size 256 --num-epoch 200 &
+# 55365 CUDA_VISIBLE_DEVICES=2 nohup python3 train.py --train-dir /datasets/FFHQ --eval-dir /datasets/FFHQ_test/ --outputs-dir weights_stylegan2 --batch-size 16 --patch-size 256 --num-epoch 200 &
 if __name__ == "__main__":
     """로그 설정"""
     logger = logging.getLogger(__name__)
