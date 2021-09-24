@@ -57,6 +57,7 @@ def gan_trainer(
     generator_optimizer,
     discriminator_optimizer,
     epoch,
+    mean_path_length,
     device,
     writer,
     args,
@@ -135,6 +136,26 @@ def gan_trainer(
         """ 가중치 업데이트 """
         g_loss.backward()
         generator_optimizer.step()
+
+        g_regularize = i % args.g_reg_every == 0
+
+        if g_regularize:
+            path_batch_size = max(1, args.batch // args.path_batch_shrink)
+            noise = mixing_noise(path_batch_size, args.latent, args.mixing, device)
+            fake_img, latents = generator(noise, return_latents=True)
+
+            path_loss, mean_path_length, path_lengths = g_path_regularize(
+                fake_img, latents, mean_path_length
+            )
+
+            generator.zero_grad()
+            weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
+
+            if args.path_batch_shrink:
+                weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
+
+            weighted_path_loss.backward()
+            generator_optimizer.step()
 
         if i == 0:
             vutils.save_image(
@@ -231,9 +252,11 @@ def main_worker(gpu, args):
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
-    """ epoch 설정 """
+    """ epoch 및 기타 설정 """
     g_epoch = 0
     d_epoch = 0
+    mean_path_length = 0
+    path_lengths = 0
 
     """ 체크포인트 weight 불러오기 """
     if os.path.exists(args.resume_g):
@@ -306,6 +329,8 @@ def main_worker(gpu, args):
             generator_optimizer=generator_optimizer,
             discriminator_optimizer=discriminator_optimizer,
             epoch=epoch,
+            mean_path_length=mean_path_length,
+            path_lengths=path_lengths,
             device=gpu,
             writer=writer,
             args=args,
