@@ -13,7 +13,7 @@ from torch.utils.data.dataloader import DataLoader
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import AverageMeter, mixing_noise
+from utils import AverageMeter, mixing_noise, requires_grad
 from dataset import Dataset
 from PIL import Image
 from models.loss import (
@@ -51,7 +51,6 @@ def cleanup():
 
 def gan_trainer(
     train_dataloader,
-    eval_dataloader,
     generator,
     discriminator,
     generator_optimizer,
@@ -64,9 +63,6 @@ def gan_trainer(
 ):
     generator.train()
     discriminator.train()
-
-    """ latent z 랜덤 생성 """
-    sample_z = torch.randn(args.batch_size, args.style_dims, device=device)
 
     """ Losses average meter 설정 """
     d_losses = AverageMeter(name="D Loss", fmt=":.6f")
@@ -84,11 +80,8 @@ def gan_trainer(
         real_img = hr.to(device)
 
         """============= 식별자 학습 ============="""
-        # requires_grad(generator, False)
-        # requires_grad(discriminator, True)
-
-        """ 식별자 최적화 초기화 """
-        discriminator_optimizer.zero_grad()
+        requires_grad(generator, False)
+        requires_grad(discriminator, True)
 
         """추론"""
         noise = mixing_noise(args.batch_size, args.style_dims, args.mixing, device)
@@ -96,12 +89,13 @@ def gan_trainer(
 
         """ 식별자 통과 후 loss 계산 """
         real_output = discriminator(real_img)
-        fake_output = discriminator(fake_img.detach())
+        fake_output = discriminator(fake_img)
         d_loss = d_logistic_loss(real_output, fake_output)
         real_score.update(real_output.mean(), hr.size(0))
         fake_score.update(fake_output.mean(), hr.size(0))
 
         """ 가중치 업데이트 """
+        discriminator.zero_grad()
         d_loss.backward()
         discriminator_optimizer.step()
 
@@ -119,11 +113,8 @@ def gan_trainer(
             discriminator_optimizer.step()
 
         """============= 생성자 학습 ============="""
-        # requires_grad(generator, True)
-        # requires_grad(discriminator, False)
-
-        """ 생성자 최적화 초기화 """
-        generator_optimizer.zero_grad()
+        requires_grad(generator, True)
+        requires_grad(discriminator, False)
 
         """추론"""
         noise = mixing_noise(args.batch_size, args.style_dims, args.mixing, device)
@@ -134,37 +125,16 @@ def gan_trainer(
         g_loss = g_nonsaturating_loss(fake_pred)
 
         """ 가중치 업데이트 """
+        generator.zero_grad()
         g_loss.backward()
         generator_optimizer.step()
 
-        g_regularize = i % args.g_reg_every == 0
-
-        if g_regularize:
-            path_batch_size = max(1, args.batch // args.path_batch_shrink)
-            noise = mixing_noise(path_batch_size, args.latent, args.mixing, device)
-            fake_img, latents = generator(noise, return_latents=True)
-
-            path_loss, mean_path_length, path_lengths = g_path_regularize(
-                fake_img, latents, mean_path_length
-            )
-
-            generator.zero_grad()
-            weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
-
-            if args.path_batch_shrink:
-                weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
-
-            weighted_path_loss.backward()
-            generator_optimizer.step()
-
+        """ 학습 결과 저장 """
         if i == 0:
             vutils.save_image(
-                fake_output.detach(),
+                fake_output,
                 os.path.join(args.outputs_dir, f"preds_{epoch}.jpg"),
             )
-
-        """ 생성자 초기화 """
-        generator.zero_grad()
 
         """ loss 업데이트 """
         d_losses.update(d_loss.item(), hr.size(0))
@@ -256,7 +226,6 @@ def main_worker(gpu, args):
     g_epoch = 0
     d_epoch = 0
     mean_path_length = 0
-    path_lengths = 0
 
     """ 체크포인트 weight 불러오기 """
     if os.path.exists(args.resume_g):
@@ -272,7 +241,6 @@ def main_worker(gpu, args):
 
     """ 데이터셋 설정 """
     train_dataset = Dataset(args.train_dir, args.patch_size)
-    eval_dataset = Dataset(args.eval_dir, args.patch_size)
     train_sampler = None
 
     if args.distributed:
@@ -289,27 +257,18 @@ def main_worker(gpu, args):
         num_workers=args.num_workers,
         pin_memory=True,
         sampler=train_sampler,
-    )
-
-    eval_dataloader = DataLoader(
-        dataset=eval_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
         drop_last=True,
     )
 
     if gpu == 0 or not args.distributed:
         """로그 인포 프린트 하기"""
         logger.info(
-            f"GPEN MODEL INFO:\n"
-            f"GPEN TRAINING INFO:\n"
+            f"StyleGAN2 MODEL INFO:\n"
+            f"StyleGAN2 TRAINING INFO:\n"
             f"\tTotal Epoch:                   {args.num_epochs}\n"
             f"\tStart generator Epoch:         {g_epoch}\n"
             f"\tStart discrimnator Epoch:      {d_epoch}\n"
             f"\tTrain directory path:          {args.train_dir}\n"
-            f"\tTest directory path:           {args.eval_dir}\n"
             f"\tOutput weights directory path: {args.outputs_dir}\n"
             f"\tGAN learning rate:             {args.lr}\n"
             f"\tPatch size:                    {args.patch_size}\n"
@@ -323,21 +282,19 @@ def main_worker(gpu, args):
     for epoch in range(g_epoch, args.num_epochs):
         gan_trainer(
             train_dataloader=train_dataloader,
-            eval_dataloader=eval_dataloader,
             generator=generator,
             discriminator=discriminator,
             generator_optimizer=generator_optimizer,
             discriminator_optimizer=discriminator_optimizer,
             epoch=epoch,
             mean_path_length=mean_path_length,
-            path_lengths=path_lengths,
             device=gpu,
             writer=writer,
             args=args,
         )
 
 
-# 55365 CUDA_VISIBLE_DEVICES=2 nohup python3 train.py --train-dir /datasets/FFHQ --eval-dir /datasets/FFHQ_test/ --outputs-dir weights_stylegan2 --batch-size 16 --patch-size 256 --num-epoch 200 &
+# 13007 CUDA_VISIBLE_DEVICES=2 nohup python3 train.py --train-dir /datasets/FFHQ --outputs-dir weights_GPEN_STYLEGAN --batch-size 16 --patch-size 256 --num-epoch 200 &
 if __name__ == "__main__":
     """로그 설정"""
     logger = logging.getLogger(__name__)
@@ -348,7 +305,6 @@ if __name__ == "__main__":
 
     """data args setup"""
     parser.add_argument("--train-dir", type=str, required=True)
-    parser.add_argument("--eval-dir", type=str, required=True)
     parser.add_argument("--outputs-dir", type=str, required=True)
 
     """model args setup"""
