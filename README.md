@@ -39,6 +39,4 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 train.py --train-dir ${train directory} --e
 
 <br />
 
-![](https://images.velog.io/images/heaseo/post/d21d242a-7f6b-405a-ae0e-6abd1c379346/preds_31.jpg)
-
-아직 학습이 끝나지는 않았지만 점차 학습이 진행되면서 모델이 어떤 결과를 보여주는지 볼 수 있었다. 
+![](https://images.velog.io/images/heaseo/post/db08ce5e-f2d7-4d40-8108-331f684d0bac/preds_174.jpg)
