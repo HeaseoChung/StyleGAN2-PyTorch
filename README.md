@@ -26,7 +26,7 @@ CUDA_VISIBLE_DEVICES=3 python3 train.py --train-dir ${train directory} --eval-di
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 train.py --train-dir ${train directory} --eval-dir ${test directory} - --outputs-dir ${a directory where trained models will be saved}  --batch-size 16 --patch-size 256--distributed
 ```
 
-## 현재까지 학습 진행 결과
+## 학습 진행 결과
 ![](https://images.velog.io/images/heaseo/post/d2da0882-456c-4ca9-a688-90b6391cadef/preds_0.jpg)
 
 <br />
