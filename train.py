@@ -158,6 +158,8 @@ def gan_trainer(
                 fake_img,
                 os.path.join(args.outputs_dir, f"preds_{itertaion}.jpg"),
             )
+        
+        itertaion += 1
 
     if args.distributed and device == 0:
         """Generator 모델 저장"""
@@ -197,7 +199,6 @@ def gan_trainer(
 
     if device == 0:
         print("Training complete in: " + str(datetime.now() - start))
-        itertaion += 1
 
 
 def main_worker(gpu, args):
