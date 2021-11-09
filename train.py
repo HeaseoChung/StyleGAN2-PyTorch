@@ -11,9 +11,8 @@ from datetime import datetime
 
 from torch.utils.data.dataloader import DataLoader
 from torch import nn
-from torch.utils.tensorboard import SummaryWriter
 
-from utils import AverageMeter, mixing_noise, requires_grad
+from utils import mixing_noise, requires_grad
 from dataset import Dataset
 from PIL import Image
 from models.loss import (
@@ -29,6 +28,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+import wandb
 
 """ 로그 설정 """
 logger = logging.getLogger(__name__)
@@ -58,23 +58,18 @@ def gan_trainer(
     epoch,
     mean_path_length,
     device,
-    writer,
     args,
 ):
     generator.train()
     discriminator.train()
 
-    """ Losses average meter 설정 """
-    d_losses = AverageMeter(name="D Loss", fmt=":.6f")
-    g_losses = AverageMeter(name="G Loss", fmt=":.6f")
+    path_loss = torch.tensor(0.0, device=device)
+    path_lengths = torch.tensor(0.0, device=device)
 
-    """ 모델 평가 measurements 설정 """
-    fake_score = AverageMeter(name="fake_score", fmt=":.6f")
-    real_score = AverageMeter(name="real_score", fmt=":.6f")
-
-    start = datetime.now()
+    itertaion = epoch * len(train_dataloader)
 
     """  트레이닝 Epoch 시작 """
+    start = datetime.now()
     for i, hr in enumerate(train_dataloader):
         """LR & HR 디바이스 설정"""
         real_img = hr.to(device)
@@ -91,8 +86,6 @@ def gan_trainer(
         real_output = discriminator(real_img)
         fake_output = discriminator(fake_img)
         d_loss = d_logistic_loss(real_output, fake_output)
-        real_score.update(real_output.mean(), hr.size(0))
-        fake_score.update(fake_output.mean(), hr.size(0))
 
         """ 가중치 업데이트 """
         discriminator.zero_grad()
@@ -112,6 +105,11 @@ def gan_trainer(
 
             discriminator_optimizer.step()
 
+        if args.use_wandb and device == 0:
+            wandb.log({"d_real_score": real_output})
+            wandb.log({"d_fake_score": fake_output})
+            wandb.log({"d_loss": d_loss})
+
         """============= 생성자 학습 ============="""
         requires_grad(generator, True)
         requires_grad(discriminator, False)
@@ -120,25 +118,46 @@ def gan_trainer(
         noise = mixing_noise(args.batch_size, args.style_dims, args.mixing, device)
 
         """ 식별자 통과 후 loss 계산 """
-        fake_output, _ = generator(noise)
-        fake_pred = discriminator(fake_output)
-        g_loss = g_nonsaturating_loss(fake_pred)
+        fake_img, _ = generator(noise)
+        fake_output = discriminator(fake_img)
+        g_loss = g_nonsaturating_loss(fake_output)
 
         """ 가중치 업데이트 """
         generator.zero_grad()
         g_loss.backward()
         generator_optimizer.step()
 
-        """ 학습 결과 저장 """
-        if i == 0:
-            vutils.save_image(
-                fake_output,
-                os.path.join(args.outputs_dir, f"preds_{epoch}.jpg"),
+        g_regularize = i % args.g_reg_every == 0
+
+        if g_regularize:
+            path_batch_size = max(1, args.batch_size // args.path_batch_shrink)
+            noise = mixing_noise(path_batch_size, args.style_dims, args.mixing, device)
+            fake_img, latents = generator(noise, return_latents=True)
+
+            path_loss, mean_path_length, path_lengths = g_path_regularize(
+                fake_img, latents, mean_path_length
             )
 
-        """ loss 업데이트 """
-        d_losses.update(d_loss.item(), hr.size(0))
-        g_losses.update(g_loss.item(), hr.size(0))
+            generator.zero_grad()
+            weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
+
+            if args.path_batch_shrink:
+                weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
+
+            weighted_path_loss.backward()
+            generator_optimizer.step()
+
+        if args.use_wandb and device == 0:
+            wandb.log({"g_loss": g_loss})
+            wandb.log({"path_loss": path_loss})
+            wandb.log({"path_lengths": path_lengths.mean()})
+
+        """ 학습 결과 저장 """
+        if itertaion % 10000 == 0:
+            vutils.save_image(
+                fake_img,
+                os.path.join(args.outputs_dir, f"preds_{itertaion}.jpg"),
+            )
 
     if args.distributed and device == 0:
         """Generator 모델 저장"""
@@ -177,14 +196,8 @@ def gan_trainer(
         )
 
     if device == 0:
-        """1 epoch 마다 텐서보드 업데이트"""
-        writer.add_scalar("d_Loss/train", d_losses.avg, epoch)
-        writer.add_scalar("g_Loss/train", g_losses.avg, epoch)
-
-        writer.add_scalar("real_score/train", real_score.avg, epoch)
-        writer.add_scalar("fake_score/train", fake_score.avg, epoch)
-
         print("Training complete in: " + str(datetime.now() - start))
+        itertaion += 1
 
 
 def main_worker(gpu, args):
@@ -199,8 +212,9 @@ def main_worker(gpu, args):
         n_mlp=args.mlp,
         channel_multiplier=args.channel_multiplier,
         narrow=args.narrows,
-        # isconcat=args.is_concat
+        isconcat=args.is_concat
     ).to(gpu)
+
     discriminator = Discriminator(
         args.patch_size, channel_multiplier=args.channel_multiplier, narrow=args.narrows
     ).to(gpu)
@@ -275,9 +289,6 @@ def main_worker(gpu, args):
             f"\tBatch size:                    {args.batch_size}\n"
         )
 
-    """텐서보드 설정"""
-    writer = SummaryWriter(args.outputs_dir)
-
     """GAN Training"""
     for epoch in range(g_epoch, args.num_epochs):
         gan_trainer(
@@ -289,12 +300,11 @@ def main_worker(gpu, args):
             epoch=epoch,
             mean_path_length=mean_path_length,
             device=gpu,
-            writer=writer,
             args=args,
         )
 
 
-# 13007 CUDA_VISIBLE_DEVICES=2 nohup python3 train.py --train-dir /datasets/FFHQ --outputs-dir weights_GPEN_STYLEGAN --batch-size 16 --patch-size 256 --num-epoch 200 &
+# 3700 CUDA_VISIBLE_DEVICES=3 nohup python3 train.py --train-dir /dataset/merged_FFHQ/ --outputs-dir weights_GPEN_STYLEGAN_with_g_reg --patch-size 256 --use-wandb &
 if __name__ == "__main__":
     """로그 설정"""
     logger = logging.getLogger(__name__)
@@ -318,13 +328,13 @@ if __name__ == "__main__":
         "--r1", type=float, default=10, help="weight of the r1 regularization"
     )
     parser.add_argument(
-        "--path_regularize",
+        "--path-regularize",
         type=float,
         default=2,
         help="weight of the path length regularization",
     )
     parser.add_argument(
-        "--path_batch_shrink",
+        "--path-batch-shrink",
         type=int,
         default=2,
         help="batch size reducing factor for the path length regularization (reduce memory consumption)",
@@ -352,10 +362,10 @@ if __name__ == "__main__":
 
     """Training details args setup"""
     parser.add_argument("--lr", type=float, default=2e-3)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--num-epochs", type=int, default=1000)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--num-epochs", type=int, default=15)
     parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--save-every", type=int, default=10)
+    parser.add_argument("--save-every", type=int, default=3)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--resume-g", type=str, default="generator.pth")
     parser.add_argument("--resume-d", type=str, default="discriminator.pth")
@@ -374,7 +384,12 @@ if __name__ == "__main__":
         "-nr", "--nr", default=0, type=int, help="ranking within the nodes"
     )
     parser.add_argument("--distributed", action="store_true")
+    parser.add_argument("--use-wandb", action="store_true")
     args = parser.parse_args()
+
+    if args.use_wandb:
+        wandb.init(project="StyleGAN2")
+        wandb.config.update(args)
 
     """ weight를 저장 할 경로 설정 """
     args.outputs_dir = os.path.join(args.outputs_dir, f"StyleGAN2")
