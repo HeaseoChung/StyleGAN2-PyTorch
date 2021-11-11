@@ -63,13 +63,11 @@ def gan_trainer(
     generator.train()
     discriminator.train()
 
-    path_loss = torch.tensor(0.0, device=device)
-    path_lengths = torch.tensor(0.0, device=device)
-
-    itertaion = epoch * len(train_dataloader)
+    iteration = epoch * len(train_dataloader)
 
     """  트레이닝 Epoch 시작 """
     start = datetime.now()
+
     for i, hr in enumerate(train_dataloader):
         """LR & HR 디바이스 설정"""
         real_img = hr.to(device)
@@ -83,9 +81,9 @@ def gan_trainer(
         fake_img, _ = generator(noise)
 
         """ 식별자 통과 후 loss 계산 """
-        real_output = discriminator(real_img)
-        fake_output = discriminator(fake_img)
-        d_loss = d_logistic_loss(real_output, fake_output)
+        real_pred = discriminator(real_img)
+        fake_pred = discriminator(fake_img)
+        d_loss = d_logistic_loss(real_pred, fake_pred)
 
         """ 가중치 업데이트 """
         discriminator.zero_grad()
@@ -93,7 +91,6 @@ def gan_trainer(
         discriminator_optimizer.step()
 
         d_regularize = i % args.d_reg_every == 0
-
         if d_regularize:
             real_img.requires_grad = True
 
@@ -106,9 +103,9 @@ def gan_trainer(
             discriminator_optimizer.step()
 
         if args.use_wandb and device == 0:
-            wandb.log({"d_real_score": real_output})
-            wandb.log({"d_fake_score": fake_output})
-            wandb.log({"d_loss": d_loss})
+            wandb.log({"d_real_score": real_pred}, step=iteration)
+            wandb.log({"d_fake_score": fake_pred}, step=iteration)
+            wandb.log({"d_loss": d_loss}, step=iteration)
 
         """============= 생성자 학습 ============="""
         requires_grad(generator, True)
@@ -119,8 +116,9 @@ def gan_trainer(
 
         """ 식별자 통과 후 loss 계산 """
         fake_img, _ = generator(noise)
-        fake_output = discriminator(fake_img)
-        g_loss = g_nonsaturating_loss(fake_output)
+
+        fake_pred = discriminator(fake_img)
+        g_loss = g_nonsaturating_loss(fake_pred)
 
         """ 가중치 업데이트 """
         generator.zero_grad()
@@ -148,18 +146,13 @@ def gan_trainer(
             generator_optimizer.step()
 
         if args.use_wandb and device == 0:
-            wandb.log({"g_loss": g_loss})
-            wandb.log({"path_loss": path_loss})
-            wandb.log({"path_lengths": path_lengths.mean()})
-
-        """ 학습 결과 저장 """
-        if itertaion % 10000 == 0:
-            vutils.save_image(
-                fake_img,
-                os.path.join(args.outputs_dir, f"preds_{itertaion}.jpg"),
-            )
+            wandb.log({"g_loss": g_loss}, step=iteration)
+            wandb.log({"path_loss": path_loss}, step=iteration)
+            wandb.log({"path_lengths": path_lengths.mean()}, step=iteration)
+            if iteration % 1000 == 0:
+                wandb.log({"Results": [wandb.Image(fake_img, caption="Epoch{}-step{}_Label".format(epoch, iteration))]})
+            iteration += 1
         
-        itertaion += 1
 
     if args.distributed and device == 0:
         """Generator 모델 저장"""
@@ -305,7 +298,7 @@ def main_worker(gpu, args):
         )
 
 
-# 3700 CUDA_VISIBLE_DEVICES=3 nohup python3 train.py --train-dir /dataset/merged_FFHQ/ --outputs-dir weights_GPEN_STYLEGAN_with_g_reg --patch-size 256 --use-wandb &
+# 874 CUDA_VISIBLE_DEVICES=0 nohup python3 train.py --train-dir /dataset/merged_FFHQ/ --outputs-dir weights_GPEN_STYLEGAN_with_g_reg --patch-size 256 --use-wandb --is-concat &
 if __name__ == "__main__":
     """로그 설정"""
     logger = logging.getLogger(__name__)
@@ -364,9 +357,9 @@ if __name__ == "__main__":
     """Training details args setup"""
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--num-epochs", type=int, default=15)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--save-every", type=int, default=3)
+    parser.add_argument("--num-epochs", type=int, default=31)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--save-every", type=int, default=2)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--resume-g", type=str, default="generator.pth")
     parser.add_argument("--resume-d", type=str, default="discriminator.pth")
