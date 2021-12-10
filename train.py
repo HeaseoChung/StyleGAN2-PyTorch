@@ -210,7 +210,7 @@ def main_worker(gpu, args):
     ).to(gpu)
 
     discriminator = Discriminator(
-        args.patch_size, channel_multiplier=args.channel_multiplier, narrow=args.narrows
+        args.patch_size, channel_multiplier=args.channel_multiplier, narrow=args.narrows*2
     ).to(gpu)
 
     """ regularzation ratio 설정 """
